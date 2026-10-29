@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#111719" />
+    <meta name="description" content="TunnelGuard AMR autonomous tunnel inspection rover dashboard" />
+    <title>TunnelGuard AMR | Tunnel inspection</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="TunnelGuard AMR dashboard">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 42 42" fill="none">
+              <path d="M7 29V19a14 14 0 0 1 28 0v10" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+              <path d="M12 28V19a9 9 0 0 1 18 0v9" stroke="currentColor" stroke-width="2" opacity=".55"/>
+              <path d="M10 29h22" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+              <circle cx="13" cy="31" r="3" fill="#92E6B5"/><circle cx="29" cy="31" r="3" fill="#92E6B5"/>
+              <path d="M18 22h6l2 5h-10l2-5Z" fill="#92E6B5"/>
+            </svg>
+          </span>
+          <span class="brand-copy">
+            <strong>TunnelGuard <span>AMR</span></strong>
+            <small>AUTONOMOUS TUNNEL INSPECTION ROVER</small>
+          </span>
+        </a>
+        <div class="header-right">
+          <div class="connection" id="connectionBox" aria-live="polite">
+            <span class="status-dot" id="connectionDot"></span>
+            <span><small>ESP32 LINK</small><strong id="connectionText">DISCONNECTED</strong></span>
+          </div>
+          <div class="connection secondary-connection" aria-live="polite">
+            <span class="status-dot" id="wifiStatusDot"></span>
+            <span><small>ESP32 WI-FI</small><strong id="wifiStatusText">UNKNOWN</strong></span>
+          </div>
+          <div class="connection secondary-connection" aria-live="polite">
+            <span class="status-dot" id="telemetryStatusDot"></span>
+            <span><small>TELEMETRY</small><strong id="telemetryStatusText">DISCONNECTED</strong></span>
+          </div>
+          <label class="mode-control" for="modeSelect">
+            <span>OPERATING MODE</span>
+            <select id="modeSelect" aria-label="Operating mode">
+              <option value="auto">Automatic Mode</option>
+              <option value="manual">Manual Mode</option>
+              <option value="demo">Demo Mode</option>
+            </select>
+          </label>
+          <button class="stop-button" id="stopButton" type="button" disabled>
+            <span class="stop-icon">■</span> EMERGENCY STOP
+          </button>
+        </div>
+      </header>
+
+      <section class="connection-settings" id="connectionSettings" aria-label="ESP32 connection settings">
+        <h2>ESP32 CONNECTION · EDIT WEBSOCKET URL</h2>
+        <form class="connection-form" id="connectionForm">
+          <label for="websocketUrl">ESP32 WebSocket URL</label>
+          <input id="websocketUrl" name="websocketUrl" type="url" inputmode="url"
+            placeholder="ws://&lt;ESP32_IP&gt;:81" autocomplete="url" spellcheck="false"
+            aria-describedby="websocketHelp" required />
+          <button class="small-button connect-button" type="submit">Connect</button>
+          <button class="small-button" id="disconnectButton" type="button">Disconnect</button>
+          <small id="websocketHelp">Enter the actual IP and port 81 printed by the firmware. The last URL is saved in this browser.</small>
+        </form>
+      </section>
+
+      <nav class="page-nav" aria-label="Main navigation">
+        <a href="#dashboard" data-page-link="dashboard" aria-current="page">Dashboard</a>
+        <a href="#map" data-page-link="map">Map</a>
+        <a href="#3d-view" data-page-link="3d-view">3D view</a>
+      </nav>
+
+      <main>
+        <div class="safety-banner hidden" id="safetyBanner" role="status">
+          <span class="banner-icon">!</span>
+          <div><strong>ESP32 disconnected</strong><span>Live readings are unavailable. The rover's physical state is unknown; no stop command can be sent.</span></div>
+          <button class="text-button" id="reconnectButton" type="button">Reconnect</button>
+        </div>
+        <div class="telemetry-banner hidden" id="staleBanner" role="status">
+          <span class="banner-icon">!</span>
+          <div><strong>Telemetry stale</strong><span>No valid telemetry update has arrived for 1.5 seconds. Values are unavailable; the map shows history only.</span></div>
+        </div>
+        <div class="demo-banner hidden" id="demoBanner">
+          <span class="demo-pill">DEMO</span>
+          <span>DEMO — SYNTHETIC DATA, NOT A REAL SCAN</span>
+          <span class="demo-separation">No telemetry or motor commands are sent to the ESP32 in this mode.</span>
+        </div>
+
+        <section class="page-view" id="dashboardPage" aria-label="Dashboard overview">
+          <div class="dashboard-grid">
+          <article class="panel speed-panel">
+            <div class="panel-heading">
+              <div><span class="eyebrow">MOTION</span><h2>Drive overview</h2></div>
+              <span class="data-tag" id="dataTag">WAITING FOR TELEMETRY</span>
+            </div>
+            <div class="speed-layout">
+              <div class="gauge-wrap">
+                <svg class="speed-gauge" viewBox="0 0 280 210" role="img" aria-label="Current rover speed">
+                  <path class="gauge-track" d="M 28 174 A 112 112 0 1 1 252 174"/>
+                  <path class="gauge-progress" id="gaugeProgress" d="M 28 174 A 112 112 0 1 1 252 174"/>
+                  <g id="gaugeTicks"></g>
+                  <text x="140" y="115" class="gauge-value" id="speedValue">--</text>
+                  <text x="140" y="139" class="gauge-unit">CM/S</text>
+                  <text x="54" y="191" class="gauge-scale">0</text>
+                  <text x="226" y="191" class="gauge-scale">60</text>
+                  <text x="140" y="176" class="gauge-subvalue" id="speedKmh">-- km/h</text>
+                </svg>
+              </div>
+              <div class="drive-details">
+                <div class="speed-level">
+                  <div><span class="eyebrow">SPEED LEVEL</span><strong id="speedLevel">-- <small>/ 3</small></strong></div>
+                  <span class="level-indicator" id="levelIndicator"></span>
+                </div>
+                <div class="state-card">
+                  <span class="eyebrow">ROBOT STATE</span>
+                  <strong class="state-value unknown" id="robotState">UNKNOWN</strong>
+                  <span class="state-caption" id="stateCaption">Waiting for fresh status</span>
+                </div>
+                <div class="speed-controls" id="speedControls" aria-label="Select speed level">
+                  <button type="button" class="speed-option" data-level="1" disabled><b>1</b><span>Slow</span></button>
+                  <button type="button" class="speed-option" data-level="2" disabled><b>2</b><span>Medium</span></button>
+                  <button type="button" class="speed-option" data-level="3" disabled><b>3</b><span>Fast</span></button>
+                </div>
+                <small class="command-note" id="commandNote">Speed controls available after fresh ESP32 telemetry.</small>
+                <div class="mode-commands">
+                  <button class="small-button" id="startAutoButton" type="button" disabled>Start Automatic</button>
+                  <button class="small-button" id="stopAutoButton" type="button" disabled>Stop</button>
+                  <button class="small-button hidden" id="manualStopInlineButton" type="button" disabled>Stop</button>
+                  <button class="small-button" id="resetStopButton" type="button" disabled>Reset after stop</button>
+                </div>
+                <small class="auto-limitation" id="sensorWarning" role="status">Automatic mode requires valid live sensor readings.</small>
+              </div>
+            </div>
+            <div class="chart-heading"><div><span class="eyebrow">RECENT TELEMETRY</span><strong>Speed history</strong></div><span id="chartSource">No samples</span></div>
+            <canvas id="speedChart" class="speed-chart" aria-label="Live speed history chart"></canvas>
+          </article>
+
+          <article class="panel sensor-panel">
+            <div class="panel-heading">
+              <div><span class="eyebrow">RANGE SENSORS</span><h2>Proximity</h2></div>
+              <span class="unit-label">ULTRASONIC · CM</span>
+            </div>
+            <div class="sensor-cards">
+              <div class="sensor-card unknown" data-sensor="front">
+                <span class="sensor-direction">FRONT</span><span class="sensor-status">UNAVAILABLE</span>
+                <strong class="sensor-value">--</strong><small>cm</small>
+              </div>
+              <div class="sensor-card unknown" data-sensor="left">
+                <span class="sensor-direction">LEFT</span><span class="sensor-status">UNAVAILABLE</span>
+                <strong class="sensor-value">--</strong><small>cm</small>
+              </div>
+              <div class="sensor-card unknown" data-sensor="right">
+                <span class="sensor-direction">RIGHT</span><span class="sensor-status">UNAVAILABLE</span>
+                <strong class="sensor-value">--</strong><small>cm</small>
+              </div>
+            </div>
+            <div class="telemetry-grid">
+              <div><span>HEADING</span><strong id="headingValue">--<small>°</small></strong></div>
+              <div><span>EST. POSITION</span><strong id="positionValue">--, --<small> m</small></strong></div>
+              <div><span>MPU SENSOR</span><strong id="mpuValue" class="muted-value">UNKNOWN</strong></div>
+              <div><span>WI-FI LINK</span><strong id="wifiValue">--</strong></div>
+              <div><span>LAST ESP32 IP</span><strong id="esp32IpValue">--</strong></div>
+              <div><span>LAST WI-FI RSSI</span><strong id="wifiRssiValue">--</strong></div>
+              <div><span>TELEMETRY SEQ</span><strong id="sequenceValue">--</strong></div>
+              <div><span>LAST UPDATE</span><strong id="telemetryAgeValue">--</strong></div>
+            </div>
+            <div class="telemetry-error hidden" id="connectionErrorValue" role="status"></div>
+            <div class="led-inference">
+              <span class="led-dot" id="ledDot"></span>
+              <div><span class="eyebrow">WS2812B STATUS · INFERRED</span><strong id="ledStatus">Unknown — no fresh telemetry</strong></div>
+              <span class="inferred-label">NOT HARDWARE FEEDBACK</span>
+            </div>
+          </article>
+
+          <article class="panel manual-panel hidden" id="manualPanel">
+            <div class="panel-heading">
+              <div><span class="eyebrow">LIVE ROBOT CONTROL</span><h2>Manual drive</h2></div>
+              <span class="unit-label">PRESS AND HOLD TO MOVE</span>
+            </div>
+            <div class="manual-pad" role="group" aria-label="Manual direction controls">
+              <span class="manual-pad-spacer" aria-hidden="true"></span>
+              <button type="button" class="manual-drive-button" data-manual-action="FORWARD" disabled>▲<span>Forward</span></button>
+              <span class="manual-pad-spacer" aria-hidden="true"></span>
+              <button type="button" class="manual-drive-button" data-manual-action="LEFT" disabled>◀<span>Left</span></button>
+              <button type="button" class="manual-drive-button" data-manual-action="REVERSE" disabled>▼<span>Reverse</span></button>
+              <button type="button" class="manual-drive-button" data-manual-action="RIGHT" disabled>▶<span>Right</span></button>
+            </div>
+            <button type="button" id="manualStopButton" class="manual-stop-button" disabled>■ STOP</button>
+            <p class="manual-help">Movement is sent only while a direction is held and fresh live telemetry is arriving. Releasing a direction sends an immediate stop command. The firmware's 700 ms command lease is a backup.</p>
+          </article>
+
+          <article class="panel event-panel">
+            <div class="panel-heading">
+              <div><span class="eyebrow">SYSTEM ACTIVITY</span><h2>Event history</h2></div>
+              <button class="small-button" id="clearEventsButton" type="button">Clear</button>
+            </div>
+            <div class="event-list" id="eventList" aria-live="polite">
+              <div class="empty-state" id="emptyEvents">Events will appear here as telemetry arrives.</div>
+            </div>
+            <div class="event-footer"><span id="eventCount">0 events</span><span>Most recent 80 retained</span></div>
+          </article>
+          </div>
+        </section>
+
+        <section class="page-view hidden" id="mapPage" aria-label="Rover map">
+          <div class="page-heading">
+            <div><span class="eyebrow">LOCALISATION</span><h1>Rover map</h1><p class="panel-description">Simulated map in Demo Mode · approximate odometry in Live Robot Mode · not SLAM</p></div>
+            <span class="page-status map-data-status" id="mapDataStatus">WAITING FOR LIVE TELEMETRY</span>
+          </div>
+          <article class="panel map-panel">
+            <div class="panel-heading map-heading">
+              <div><span class="eyebrow">ROVER POSITION</span><h2>Map and trajectory</h2></div>
+              <div class="map-actions">
+                <button class="icon-button" id="zoomOutButton" aria-label="Zoom out" title="Zoom out">−</button>
+                <button class="icon-button" id="zoomInButton" aria-label="Zoom in" title="Zoom in">+</button>
+                <button class="small-button" id="resetMapButton" type="button">Reset map</button>
+                <button class="small-button hidden" id="resetPositionButton" type="button" title="Send RESET_POSITION to the ESP32">Reset position</button>
+              </div>
+            </div>
+            <div class="map-canvas-wrap">
+              <canvas id="mapCanvas" aria-label="Top-down approximate rover map"></canvas>
+              <div class="map-hint" id="mapHint">Waiting for position data</div>
+              <span class="map-axis-label">TOP-DOWN VIEW</span>
+            </div>
+            <div class="map-footer">
+              <div class="map-legend">
+                <span><i class="legend-robot"></i>Robot</span>
+                <span><i class="legend-trail"></i>Trajectory</span>
+                <span class="auto-legend-item"><i class="legend-obstacle"></i>Sensor-estimated obstacle</span>
+                <span class="demo-class-item"><i class="finding class-wall"></i>Wall</span>
+                <span class="demo-class-item"><i class="finding class-floor"></i>Floor</span>
+                <span class="demo-class-item"><i class="finding class-ceiling"></i>Ceiling</span>
+                <span class="demo-class-item"><i class="finding class-rock"></i>Rock</span>
+                <span class="demo-class-item"><i class="finding class-rubble"></i>Rubble</span>
+                <span class="demo-class-item"><i class="finding class-box"></i>Box</span>
+                <span class="demo-class-item"><i class="finding class-unknown"></i>Unknown</span>
+                <span class="demo-class-item"><i class="legend-unexplored"></i>Unobserved</span>
+              </div>
+              <span class="map-help">Drag to pan · scroll to zoom</span>
+            </div>
+            <p class="map-disclaimer">Approximate encoder/IMU odometry only; sensor obstacle positions are estimates without measured mounting offsets. Not SLAM or a safety-rated navigation system.</p>
+          </article>
+        </section>
+
+        <section class="page-view hidden" id="threeDPage" aria-label="Three-dimensional tunnel view">
+          <div class="page-heading">
+            <div><span class="eyebrow">TUNNEL INSPECTION</span><h1>3D tunnel view</h1><p class="panel-description">Interactive tunnel model and example findings</p></div>
+            <span class="page-status">SIMULATED MULTI-LAYER LIDAR · NOT HARDWARE DATA</span>
+          </div>
+          <div class="panel view-unavailable" id="tunnelUnavailable">
+            <span class="demo-pill">DEMO ONLY</span>
+            <h2>3D view is available in Demo Mode</h2>
+            <p>This tunnel and its example findings are synthetic visualisations, not a live hardware scan. Choose Demo Mode from the data source menu to explore the scene.</p>
+          </div>
+          <article class="panel tunnel-panel hidden" id="tunnelPanel">
+            <div class="panel-heading">
+              <div><span class="eyebrow">SHARED SIMULATION ENVIRONMENT</span><h2>3D tunnel inspection</h2></div>
+              <span class="demo-pill">DEMO ONLY</span>
+            </div>
+            <div class="inspection-layout">
+              <div class="tunnel-view-wrap">
+                <canvas id="tunnelCanvas" aria-label="Interactive 3D synthetic tunnel"></canvas>
+                <div class="tunnel-label">SIMULATED SURFACES + SIMULATED CLASSIFIED POINT CLOUD</div>
+                <div class="tunnel-tools"><button class="small-button" id="resetCameraButton" type="button">Reset camera</button></div>
+              </div>
+              <aside class="camera-panel">
+                <div class="camera-heading">
+                  <div><span class="eyebrow">FRONT CAMERA</span><strong>Simulated visual inspection</strong></div>
+                  <span class="demo-pill">SYNTHETIC</span>
+                </div>
+                <div class="camera-feed">
+                  <canvas id="inspectionCameraCanvas" aria-label="Simulated low-resolution forward camera image"></canvas>
+                  <span id="cameraTimestamp">Waiting for camera frame</span>
+                </div>
+                <div class="camera-findings" id="cameraFindings" aria-live="polite">
+                  <span class="empty-detections">No visual findings in frame.</span>
+                </div>
+                <p class="camera-disclaimer">Generated from the synthetic tunnel geometry; not a physical camera feed.</p>
+              </aside>
+            </div>
+            <div class="scan-summary" id="scanSummary">Waiting for the first simulated scan.</div>
+            <div class="scan-validation" id="scanValidation">Synthetic ground-truth comparison is for demo validation only.</div>
+            <div class="detection-list" id="detectionList" aria-live="polite">
+              <span class="empty-detections">No simulated obstacle clusters yet.</span>
+            </div>
+            <div class="tunnel-footer">
+              <div class="finding-legend">
+                <span><i class="finding class-wall"></i>Wall</span>
+                <span><i class="finding class-floor"></i>Floor</span>
+                <span><i class="finding class-ceiling"></i>Ceiling</span>
+                <span><i class="finding class-rock"></i>Rock</span>
+                <span><i class="finding class-rubble"></i>Rubble</span>
+                <span><i class="finding class-box"></i>Box</span>
+                <span><i class="finding class-unknown"></i>Unknown</span>
+              </div>
+              <div class="simulation-controls">
+                <button class="small-button" id="simulationToggle" type="button">Pause</button>
+                <label for="simulationSpeed">SIM SPEED</label>
+                <select id="simulationSpeed" aria-label="Simulation speed">
+                  <option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option>
+                </select>
+              </div>
+              <div class="simulation-controls lidar-controls">
+                <label for="lidarResolution">LIDAR STEP</label>
+                <select id="lidarResolution" aria-label="Simulated LiDAR angular resolution">
+                  <option value="1.5">1.5°</option><option value="2.5" selected>2.5°</option><option value="4">4°</option>
+                </select>
+                <label for="scanRate">SCAN RATE</label>
+                <select id="scanRate" aria-label="Simulated LiDAR scan rate">
+                  <option value="2">2 Hz</option><option value="4" selected>4 Hz</option><option value="8">8 Hz</option>
+                </select>
+              </div>
+            </div>
+          </article>
+        </section>
+      </main>
+      <footer class="app-footer">
+        <span>TUNNELGUARD AMR <i>•</i> INSPECTION SYSTEM</span>
+        <span id="lastPacketText">No telemetry received</span>
+        <span>Browser dashboard · ESP32 handles local obstacle avoidance</span>
+      </footer>
+      <div class="toast-container" id="toastContainer" aria-live="polite"></div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
