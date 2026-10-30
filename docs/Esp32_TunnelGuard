@@ -1,0 +1,1050 @@
+
+/*
+  TunnelGuard AMR - ESP32 Integrated Firmware
+
+  Modes:
+    MANUAL: held commands over WebSocket
+    AUTO: timed obstacle avoidance
+    DEMO: dashboard-only
+
+  WebSocket port: 81
+
+  Libraries:
+    - WebSockets by Markus Sattler
+    - Adafruit NeoPixel
+
+  IMPORTANT:
+    1. Enter your Wi-Fi credentials.
+    2. HC-SR04 ECHO must be reduced to 3.3V maximum.
+    3. GPIO34/35 need electrically valid encoder outputs.
+    4. Calibrate wheel diameter and encoder ticks/revolution.
+    5. GPIO12 is a boot-strapping pin; see buzzer warning.
+    6. Test with wheels lifted and at low speed first.
+*/
+
+#include <WiFi.h>
+#include <WebSocketsServer.h>
+#include <Wire.h>
+#include <Adafruit_NeoPixel.h>
+#include <math.h>
+
+// ------------ Wi-Fi ------------
+const char* WIFI_SSID = "Galaxy M34 5G 0621";
+const char* WIFI_PASSWORD = "mansi123";
+
+
+WebSocketsServer webSocket(81);
+
+// ------------ Ultrasonic sensors ------------
+const int FRONT_TRIG = 18;
+const int FRONT_ECHO = 19;
+const int LEFT_TRIG  = 5;
+const int LEFT_ECHO  = 23;
+const int RIGHT_TRIG = 4;
+const int RIGHT_ECHO = 15;
+
+float frontCm = -1, leftCm = -1, rightCm = -1;
+
+float frontSamples[3] = {-1, -1, -1};
+float leftSamples[3]  = {-1, -1, -1};
+float rightSamples[3] = {-1, -1, -1};
+
+int sensorIndex = 0;
+
+// ------------ L298N motor driver ------------
+const int IN1 = 14;
+const int IN2 = 27;
+const int IN3 = 26;
+const int IN4 = 25;
+const int ENA = 33;
+const int ENB = 32;
+
+// Change to -1 if a motor's forward direction is reversed.
+const int LEFT_MOTOR_POLARITY = 1;
+const int RIGHT_MOTOR_POLARITY = 1;
+
+int leftMotorCommand = 0;
+int rightMotorCommand = 0;
+
+// ------------ Buzzer ------------
+const int BUZZER_PIN = 12;  // D12 / GPIO12
+const unsigned long BUZZER_DURATION_MS = 2000;
+
+unsigned long buzzerStartMs = 0;
+bool buzzerActive = false;
+
+// Assumes an active HIGH buzzer.
+void startObstacleBuzzer() {
+  digitalWrite(BUZZER_PIN, HIGH);
+  buzzerStartMs = millis();
+  buzzerActive = true;
+}
+
+void updateBuzzer() {
+  if (buzzerActive &&
+      millis() - buzzerStartMs >= BUZZER_DURATION_MS) {
+    digitalWrite(BUZZER_PIN, LOW);
+    buzzerActive = false;
+  }
+}
+
+void stopBuzzer() {
+  digitalWrite(BUZZER_PIN, LOW);
+  buzzerActive = false;
+}
+
+// ------------ LM393 wheel encoders ------------
+const int LEFT_ENCODER = 35;
+const int RIGHT_ENCODER = 34;
+
+volatile int32_t leftTicksISR = 0;
+volatile int32_t rightTicksISR = 0;
+
+// PLACEHOLDERS: calibrate for your actual robot.
+const float WHEEL_DIAMETER_CM = 6.5f;
+const float WHEEL_BASE_CM = 16.0f;
+const float TICKS_PER_REV_LEFT = 20.0f;
+const float TICKS_PER_REV_RIGHT = 20.0f;
+
+// ------------ MPU6050 ------------
+const int I2C_SDA = 22;
+const int I2C_SCL = 21;
+
+uint8_t mpuAddress = 0x68;
+bool mpuPresent = false;
+float gyroZBiasDps = 0.0f;
+float headingDeg = 0.0f;
+
+// ------------ WS2812B status strip ------------
+const int LED_PIN = 13;
+const int LED_COUNT = 10;
+
+Adafruit_NeoPixel strip(
+  LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800
+);
+
+// ------------ Rover state ------------
+float posX = 0.0f;
+float posY = 0.0f;
+float speedCmS = 0.0f;
+
+int speedLevel = 1; // 1=Slow, 2=Medium, 3=Fast
+
+bool autoMode = false;
+bool emergencyStop = false;
+bool obstacle = false;
+
+String obstacleDirection = "none";
+String roverState = "STOPPED";
+
+uint32_t telemetrySeq = 0;
+
+unsigned long lastTelemetryMs = 0;
+unsigned long lastSensorMs = 0;
+unsigned long lastOdomMs = 0;
+unsigned long lastManualCommandMs = 0;
+unsigned long lastWiFiAttemptMs = 0;
+
+const unsigned long TELEMETRY_INTERVAL_MS = 200;
+const unsigned long SENSOR_INTERVAL_MS = 120;
+const unsigned long MANUAL_LEASE_MS = 700;
+const unsigned long WIFI_RETRY_MS = 5000;
+
+// ------------ Automatic avoidance states ------------
+enum AutoState {
+  AUTO_CRUISE,
+  AUTO_TURN_AWAY,
+  AUTO_BYPASS,
+  AUTO_TURN_BACK
+};
+
+AutoState autoState = AUTO_CRUISE;
+
+unsigned long autoStateStartMs = 0;
+
+// -1 = turn left, +1 = turn right
+int autoTurnDirection = 0;
+
+// Increased detection distances and turn duration.
+const float FRONT_STOP_CM = 38.0f;
+const float FRONT_SLOW_CM = 58.0f;
+const float SIDE_CLEAR_CM = 30.0f;
+
+// Three times the original 420ms turning duration.
+const unsigned long TURN_TIME_MS = 1260;
+const unsigned long BYPASS_TIME_MS = 1100;
+
+// ------------ Encoder interrupts ------------
+void IRAM_ATTR leftEncoderISR() {
+  leftTicksISR++;
+}
+
+void IRAM_ATTR rightEncoderISR() {
+  rightTicksISR++;
+}
+
+// ------------ LEDs ------------
+void setLEDs(uint8_t r, uint8_t g, uint8_t b) {
+  strip.fill(strip.Color(r, g, b));
+  strip.show();
+}
+
+// ------------ Speed levels ------------
+int selectedSpeed() {
+  if (speedLevel == 1) return 110;
+  if (speedLevel == 2) return 150;
+  return 190;
+}
+
+// ------------ Motor control ------------
+void setOneMotor(
+  int pwmPin,
+  int inA,
+  int inB,
+  int command,
+  int polarity
+) {
+  command = constrain(command, -255, 255) * polarity;
+
+  if (command > 0) {
+    digitalWrite(inA, HIGH);
+    digitalWrite(inB, LOW);
+  } else if (command < 0) {
+    digitalWrite(inA, LOW);
+    digitalWrite(inB, HIGH);
+  } else {
+    digitalWrite(inA, LOW);
+    digitalWrite(inB, LOW);
+  }
+
+  analogWrite(pwmPin, abs(command));
+}
+
+void setMotors(int left, int right) {
+  leftMotorCommand = constrain(left, -255, 255);
+  rightMotorCommand = constrain(right, -255, 255);
+
+  setOneMotor(
+    ENA, IN1, IN2,
+    leftMotorCommand, LEFT_MOTOR_POLARITY
+  );
+
+  setOneMotor(
+    ENB, IN3, IN4,
+    rightMotorCommand, RIGHT_MOTOR_POLARITY
+  );
+}
+
+void stopMotors() {
+  setMotors(0, 0);
+  speedCmS = 0;
+}
+
+void stopAndDisarm(const char* reason) {
+  autoMode = false;
+  stopMotors();
+  stopBuzzer();
+  roverState = reason;
+}
+
+// ------------ Corrected steering ------------
+void turnInPlace(int direction, int pwm) {
+  pwm = constrain(pwm, 0, 255);
+
+  if (direction < 0) {
+    // LEFT: left wheel forward, right wheel backward.
+    setMotors(pwm, -pwm);
+  } else {
+    // RIGHT: left wheel backward, right wheel forward.
+    setMotors(-pwm, pwm);
+  }
+}
+
+// ------------ Ultrasonic reading ------------
+float readUltrasonic(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(3);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  unsigned long duration =
+    pulseIn(echoPin, HIGH, 18000UL);
+
+  if (duration == 0) return -1.0f;
+
+  float cm = duration * 0.0343f / 2.0f;
+
+  if (cm < 2.0f || cm > 300.0f) {
+    return -1.0f;
+  }
+
+  return cm;
+}
+
+float median3(float a, float b, float c) {
+  float v[3];
+  int n = 0;
+
+  if (a >= 2 && a <= 300) v[n++] = a;
+  if (b >= 2 && b <= 300) v[n++] = b;
+  if (c >= 2 && c <= 300) v[n++] = c;
+
+  if (n == 0) return -1.0f;
+
+  for (int i = 0; i < n - 1; i++) {
+    for (int j = i + 1; j < n; j++) {
+      if (v[j] < v[i]) {
+        float t = v[i];
+        v[i] = v[j];
+        v[j] = t;
+      }
+    }
+  }
+
+  return v[n / 2];
+}
+
+void updateAllSensors() {
+  // Read sensors separately to reduce cross-talk.
+  frontSamples[sensorIndex] =
+    readUltrasonic(FRONT_TRIG, FRONT_ECHO);
+  delay(25);
+
+  leftSamples[sensorIndex] =
+    readUltrasonic(LEFT_TRIG, LEFT_ECHO);
+  delay(25);
+
+  rightSamples[sensorIndex] =
+    readUltrasonic(RIGHT_TRIG, RIGHT_ECHO);
+
+  sensorIndex = (sensorIndex + 1) % 3;
+
+  frontCm = median3(
+    frontSamples[0], frontSamples[1], frontSamples[2]
+  );
+
+  leftCm = median3(
+    leftSamples[0], leftSamples[1], leftSamples[2]
+  );
+
+  rightCm = median3(
+    rightSamples[0], rightSamples[1], rightSamples[2]
+  );
+
+  obstacle = false;
+  obstacleDirection = "none";
+
+  if (frontCm >= 0 && frontCm < FRONT_SLOW_CM) {
+    obstacle = true;
+    obstacleDirection = "front";
+  } else if (leftCm >= 0 && leftCm < SIDE_CLEAR_CM) {
+    obstacle = true;
+    obstacleDirection = "left";
+  } else if (rightCm >= 0 && rightCm < SIDE_CLEAR_CM) {
+    obstacle = true;
+    obstacleDirection = "right";
+  }
+}
+
+// ------------ MPU6050 direct I2C ------------
+bool mpuWrite(uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(mpuAddress);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+
+bool mpuReadBytes(
+  uint8_t reg,
+  uint8_t* buffer,
+  uint8_t count
+) {
+  Wire.beginTransmission(mpuAddress);
+  Wire.write(reg);
+
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+
+  uint8_t got = Wire.requestFrom(
+    mpuAddress, count, (uint8_t)true
+  );
+
+  if (got != count) return false;
+
+  for (uint8_t i = 0; i < count; i++) {
+    buffer[i] = Wire.read();
+  }
+
+  return true;
+}
+
+int16_t readInt16(uint8_t hi, uint8_t lo) {
+  return (int16_t)(
+    (((uint16_t)hi) << 8) | lo
+  );
+}
+
+bool initMPU() {
+  Wire.beginTransmission(0x68);
+  bool found68 = (Wire.endTransmission() == 0);
+
+  Wire.beginTransmission(0x69);
+  bool found69 = (Wire.endTransmission() == 0);
+
+  if (!found68 && !found69) return false;
+
+  mpuAddress = found68 ? 0x68 : 0x69;
+
+  if (!mpuWrite(0x6B, 0x00)) return false;
+
+  delay(100);
+
+  mpuWrite(0x1B, 0x00); // Gyro +/-250 degrees/s
+  mpuWrite(0x1A, 0x03); // Digital low-pass filter
+
+  return true;
+}
+
+float readGyroZDps() {
+  uint8_t b[6];
+
+  if (!mpuReadBytes(0x43, b, 6)) {
+    return 0.0f;
+  }
+
+  int16_t gz = readInt16(b[4], b[5]);
+
+  return ((float)gz / 131.0f) - gyroZBiasDps;
+}
+
+void calibrateGyroBias() {
+  if (!mpuPresent) return;
+
+  Serial.println("Keep rover still: calibrating gyro...");
+
+  double total = 0;
+  int good = 0;
+
+  for (int i = 0; i < 200; i++) {
+    uint8_t b[6];
+
+    if (mpuReadBytes(0x43, b, 6)) {
+      total += (float)readInt16(b[4], b[5]) / 131.0f;
+      good++;
+    }
+
+    delay(10);
+  }
+
+  if (good > 0) {
+    gyroZBiasDps = total / good;
+  }
+
+  Serial.print("Gyro bias: ");
+  Serial.println(gyroZBiasDps, 4);
+}
+
+// ------------ Encoder odometry + IMU heading ------------
+void updateOdometry() {
+  unsigned long now = millis();
+
+  if (now - lastOdomMs < 50) return;
+
+  if (lastOdomMs == 0) {
+    lastOdomMs = now;
+    return;
+  }
+
+  float dt = (now - lastOdomMs) / 1000.0f;
+  lastOdomMs = now;
+
+  int32_t lt, rt;
+
+  noInterrupts();
+  lt = leftTicksISR;
+  rt = rightTicksISR;
+  leftTicksISR = 0;
+  rightTicksISR = 0;
+  interrupts();
+
+  if (dt <= 0 || dt > 0.5f) return;
+
+  float leftDist =
+    ((float)lt / TICKS_PER_REV_LEFT) *
+    PI * WHEEL_DIAMETER_CM;
+
+  float rightDist =
+    ((float)rt / TICKS_PER_REV_RIGHT) *
+    PI * WHEEL_DIAMETER_CM;
+
+  // Direction estimated from motor commands.
+  if (leftMotorCommand < 0) leftDist = -leftDist;
+  if (rightMotorCommand < 0) rightDist = -rightDist;
+
+  float distance = (leftDist + rightDist) * 0.5f;
+
+  float encoderTurn =
+    (rightDist - leftDist) / WHEEL_BASE_CM *
+    180.0f / PI;
+
+  float gyroRate = mpuPresent ? readGyroZDps() : 0.0f;
+
+  if (mpuPresent) {
+    headingDeg += gyroRate * dt;
+
+    headingDeg = 0.98f * headingDeg +
+      0.02f * (headingDeg + encoderTurn);
+  } else {
+    headingDeg += encoderTurn;
+  }
+
+  while (headingDeg > 180) headingDeg -= 360;
+  while (headingDeg < -180) headingDeg += 360;
+
+  float headingRad = headingDeg * PI / 180.0f;
+
+  posX += distance * cosf(headingRad);
+  posY += distance * sinf(headingRad);
+
+  speedCmS = distance / dt;
+}
+
+// ------------ JSON command parsing ------------
+String jsonStringValue(const String& msg, const char* key) {
+  String needle = String("\"") + key + "\"";
+  int p = msg.indexOf(needle);
+
+  if (p < 0) return "";
+
+  p = msg.indexOf(':', p + needle.length());
+
+  if (p < 0) return "";
+
+  p++;
+
+  while (
+    p < (int)msg.length() &&
+    (msg[p] == ' ' || msg[p] == '"')
+  ) {
+    p++;
+  }
+
+  int end = p;
+
+  while (
+    end < (int)msg.length() &&
+    msg[end] != '"' &&
+    msg[end] != ',' &&
+    msg[end] != '}'
+  ) {
+    end++;
+  }
+
+  String out = msg.substring(p, end);
+  out.trim();
+
+  return out;
+}
+
+int jsonIntValue(
+  const String& msg,
+  const char* key,
+  int fallback
+) {
+  String value = jsonStringValue(msg, key);
+
+  if (value.length() == 0) return fallback;
+
+  return value.toInt();
+}
+
+// ------------ Manual controls ------------
+void applyManualAction(
+  String action,
+  int requestedSpeed
+) {
+  if (emergencyStop) return;
+
+  autoMode = false;
+
+  int s = constrain(requestedSpeed, 70, 230);
+  lastManualCommandMs = millis();
+
+  if (action == "FORWARD") {
+    setMotors(s, s);
+    roverState = "MANUAL_FORWARD";
+
+  } else if (action == "REVERSE") {
+    setMotors(-s, -s);
+    roverState = "MANUAL_REVERSE";
+
+  } else if (action == "LEFT") {
+    // Corrected manual LEFT.
+    turnInPlace(-1, s);
+    roverState = "MANUAL_LEFT";
+
+  } else if (action == "RIGHT") {
+    // Corrected manual RIGHT.
+    turnInPlace(1, s);
+    roverState = "MANUAL_RIGHT";
+
+  } else {
+    stopMotors();
+    roverState = "STOPPED";
+  }
+
+  setLEDs(0, 100, 255);
+}
+
+// ------------ Automatic obstacle avoidance ------------
+void startAutoTurn(int direction) {
+  autoTurnDirection = direction;
+  autoState = AUTO_TURN_AWAY;
+  autoStateStartMs = millis();
+
+  // Buzzer sounds for 2 seconds when an avoidance turn starts.
+  startObstacleBuzzer();
+
+  roverState =
+    direction < 0 ? "AUTO_TURN_LEFT" : "AUTO_TURN_RIGHT";
+}
+
+void updateAutonomousControl() {
+  if (!autoMode || emergencyStop) return;
+
+  unsigned long now = millis();
+  int baseSpeed = selectedSpeed();
+
+  switch (autoState) {
+
+    case AUTO_CRUISE:
+      // Stop safely if the front sensor has no valid reading.
+      if (frontCm < 0) {
+        stopMotors();
+        roverState = "AUTO_FRONT_SENSOR_FAULT";
+        setLEDs(255, 40, 0);
+        return;
+      }
+
+      if (frontCm < FRONT_STOP_CM) {
+        stopMotors();
+        roverState = "AUTO_OBSTACLE_STOP";
+
+        bool leftClear = leftCm >= SIDE_CLEAR_CM;
+        bool rightClear = rightCm >= SIDE_CLEAR_CM;
+
+        if (!leftClear && !rightClear) {
+          roverState = "AUTO_BLOCKED";
+          setLEDs(255, 0, 0);
+          return;
+        }
+
+        // Turn toward the side with greater measured clearance.
+        if (leftClear && (!rightClear || leftCm >= rightCm)) {
+          startAutoTurn(-1);
+        } else {
+          startAutoTurn(1);
+        }
+
+        return;
+      }
+
+      // Slow down before reaching the stopping distance.
+      if (frontCm < FRONT_SLOW_CM) {
+        setMotors(100, 100);
+        roverState = "AUTO_FORWARD_SLOW";
+      } else {
+        setMotors(baseSpeed, baseSpeed);
+        roverState = "AUTO_FORWARD";
+      }
+
+      setLEDs(0, 180, 20);
+      break;
+
+    case AUTO_TURN_AWAY:
+      turnInPlace(autoTurnDirection, baseSpeed);
+
+      if (now - autoStateStartMs >= TURN_TIME_MS) {
+        autoState = AUTO_BYPASS;
+        autoStateStartMs = now;
+      }
+      break;
+
+    case AUTO_BYPASS:
+      // Stop if the front sensor detects an immediate obstacle.
+      if (frontCm >= 0 && frontCm < 12.0f) {
+        stopMotors();
+        roverState = "AUTO_BYPASS_BLOCKED";
+        autoMode = false;
+        setLEDs(255, 0, 0);
+        return;
+      }
+
+      setMotors(
+        min(baseSpeed, 120),
+        min(baseSpeed, 120)
+      );
+
+      roverState = "AUTO_BYPASS_FORWARD";
+
+      if (now - autoStateStartMs >= BYPASS_TIME_MS) {
+        autoState = AUTO_TURN_BACK;
+        autoStateStartMs = now;
+      }
+      break;
+
+    case AUTO_TURN_BACK:
+      // Turn in the opposite direction to the initial turn.
+      turnInPlace(-autoTurnDirection, baseSpeed);
+
+      if (now - autoStateStartMs >= TURN_TIME_MS) {
+        autoState = AUTO_CRUISE;
+        autoStateStartMs = now;
+
+        stopMotors();
+        roverState = "AUTO_RECHECK_FRONT";
+      }
+      break;
+  }
+}
+
+// ------------ Telemetry to dashboard ------------
+void sendTelemetry() {
+  String json = "{";
+
+  json += "\"mode\":\"";
+  json += autoMode ? "AUTO" : "MANUAL";
+  json += "\",";
+
+  json += "\"state\":\"";
+  json += roverState;
+  json += "\",";
+
+  json += "\"speedLevel\":";
+  json += String(speedLevel);
+  json += ",";
+
+  json += "\"speedCmS\":";
+  json += String(speedCmS, 2);
+  json += ",";
+
+  json += "\"distanceCm\":{\"front\":";
+  json += String(frontCm, 1);
+  json += ",\"left\":";
+  json += String(leftCm, 1);
+  json += ",\"right\":";
+  json += String(rightCm, 1);
+  json += "},";
+
+  json += "\"headingDeg\":";
+  json += String(headingDeg, 1);
+  json += ",";
+
+  json += "\"position\":{\"x\":";
+  json += String(posX, 2);
+  json += ",\"y\":";
+  json += String(posY, 2);
+  json += "},";
+
+  json += "\"obstacle\":";
+  json += obstacle ? "true" : "false";
+  json += ",";
+
+  json += "\"obstacleDirection\":\"";
+  json += obstacleDirection;
+  json += "\",";
+
+  json += "\"mpuPresent\":";
+  json += mpuPresent ? "true" : "false";
+  json += ",";
+
+  json += "\"wifiConnected\":";
+  json += WiFi.status() == WL_CONNECTED ? "true" : "false";
+  json += ",";
+
+  json += "\"ip\":\"";
+  json += WiFi.localIP().toString();
+  json += "\",";
+
+  json += "\"wifiRssi\":";
+  json += WiFi.status() == WL_CONNECTED ?
+    String(WiFi.RSSI()) : "0";
+  json += ",";
+
+  json += "\"telemetryMs\":";
+  json += String(millis());
+  json += ",";
+
+  json += "\"seq\":";
+  json += String(++telemetrySeq);
+
+  json += "}";
+
+  webSocket.broadcastTXT(json);
+  Serial.println(json);
+}
+
+// ------------ WebSocket events ------------
+void webSocketEvent(
+  uint8_t client,
+  WStype_t type,
+  uint8_t* payload,
+  size_t length
+) {
+  if (type == WStype_CONNECTED) {
+    Serial.printf("WebSocket client %u connected\n", client);
+
+    if (roverState == "CLIENT_DISCONNECTED") {
+      roverState = "STOPPED";
+    }
+
+    return;
+  }
+
+  if (type == WStype_DISCONNECTED) {
+    Serial.printf("WebSocket client %u disconnected\n", client);
+
+    // Stop the rover when a control connection disconnects.
+    stopAndDisarm("CLIENT_DISCONNECTED");
+    setLEDs(255, 40, 0);
+
+    return;
+  }
+
+  if (type != WStype_TEXT) return;
+
+  String msg;
+  msg.reserve(length + 1);
+
+  for (size_t i = 0; i < length; i++) {
+    msg += (char)payload[i];
+  }
+
+  Serial.print("RX: ");
+  Serial.println(msg);
+
+  String command = jsonStringValue(msg, "command");
+  String action = jsonStringValue(msg, "action");
+
+  if (command == "EMERGENCY_STOP") {
+    emergencyStop = true;
+    stopAndDisarm("EMERGENCY_STOP");
+    setLEDs(255, 0, 0);
+
+  } else if (command == "RESET_STOP") {
+    emergencyStop = false;
+    stopAndDisarm("STOPPED");
+    setLEDs(0, 0, 40);
+
+  } else if (command == "STOP") {
+    stopAndDisarm("STOPPED");
+    setLEDs(0, 0, 40);
+
+  } else if (command == "MANUAL") {
+    if (action == "STOP") {
+      stopAndDisarm("STOPPED");
+      setLEDs(0, 0, 40);
+    } else {
+      int requestedSpeed =
+        jsonIntValue(msg, "speed", selectedSpeed());
+
+      applyManualAction(action, requestedSpeed);
+    }
+
+  } else if (command == "SET_SPEED") {
+    speedLevel = constrain(
+      jsonIntValue(msg, "level", 1), 1, 3
+    );
+
+  } else if (command == "START_AUTO") {
+    if (emergencyStop) {
+      roverState = "EMERGENCY_STOP";
+
+    } else if (frontCm < 0) {
+      autoMode = false;
+      stopMotors();
+      roverState = "AUTO_FRONT_SENSOR_FAULT";
+      setLEDs(255, 40, 0);
+
+    } else {
+      autoMode = true;
+      autoState = AUTO_CRUISE;
+      autoStateStartMs = millis();
+      lastManualCommandMs = millis();
+      roverState = "AUTO_STARTED";
+      setLEDs(0, 180, 20);
+    }
+
+  } else if (command == "RESET_POSITION") {
+    posX = 0;
+    posY = 0;
+    headingDeg = 0;
+
+  } else {
+    Serial.println("Unknown command received.");
+  }
+}
+
+// ------------ Setup ------------
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  // Buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  // Ultrasonic sensors
+  pinMode(FRONT_TRIG, OUTPUT);
+  pinMode(FRONT_ECHO, INPUT);
+
+  pinMode(LEFT_TRIG, OUTPUT);
+  pinMode(LEFT_ECHO, INPUT);
+
+  pinMode(RIGHT_TRIG, OUTPUT);
+  pinMode(RIGHT_ECHO, INPUT);
+
+  digitalWrite(FRONT_TRIG, LOW);
+  digitalWrite(LEFT_TRIG, LOW);
+  digitalWrite(RIGHT_TRIG, LOW);
+
+  // Motor driver
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  stopMotors();
+
+  // Encoders: GPIO34/35 have no internal pull-up.
+  pinMode(LEFT_ENCODER, INPUT);
+  pinMode(RIGHT_ENCODER, INPUT);
+
+  attachInterrupt(
+    digitalPinToInterrupt(LEFT_ENCODER),
+    leftEncoderISR, RISING
+  );
+
+  attachInterrupt(
+    digitalPinToInterrupt(RIGHT_ENCODER),
+    rightEncoderISR, RISING
+  );
+
+  // NeoPixel
+  strip.begin();
+  strip.setBrightness(35);
+  setLEDs(0, 0, 40);
+
+  // MPU6050
+  Wire.begin(I2C_SDA, I2C_SCL);
+  mpuPresent = initMPU();
+
+  Serial.print("MPU6050 detected: ");
+  Serial.println(mpuPresent ? "YES" : "NO");
+
+  if (mpuPresent) {
+    calibrateGyroBias();
+  }
+
+  // Wi-Fi
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  Serial.print("Connecting to Wi-Fi: ");
+  Serial.println(WIFI_SSID);
+
+  unsigned long start = millis();
+
+  while (
+    WiFi.status() != WL_CONNECTED &&
+    millis() - start < 20000
+  ) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Wi-Fi connected!");
+
+    Serial.print("ESP32 IP: ");
+    Serial.println(WiFi.localIP());
+
+    Serial.print("WebSocket URL: ws://");
+    Serial.print(WiFi.localIP());
+    Serial.println(":81");
+
+    Serial.print("Wi-Fi RSSI: ");
+    Serial.println(WiFi.RSSI());
+  } else {
+    Serial.println("Wi-Fi connection failed; retrying.");
+  }
+
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent);
+
+  lastSensorMs = 0;
+  lastTelemetryMs = 0;
+  lastOdomMs = millis();
+  lastWiFiAttemptMs = millis();
+}
+
+// ------------ Main loop ------------
+void loop() {
+  webSocket.loop();
+
+  unsigned long now = millis();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    if (leftMotorCommand != 0 || rightMotorCommand != 0) {
+      stopAndDisarm("WIFI_DISCONNECTED");
+    }
+
+    if (now - lastWiFiAttemptMs >= WIFI_RETRY_MS) {
+      lastWiFiAttemptMs = now;
+
+      Serial.println("Retrying Wi-Fi...");
+
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    }
+  }
+
+  if (now - lastSensorMs >= SENSOR_INTERVAL_MS) {
+    lastSensorMs = now;
+    updateAllSensors();
+  }
+
+  updateOdometry();
+
+  // Keep the buzzer non-blocking.
+  updateBuzzer();
+
+  if (autoMode) {
+    updateAutonomousControl();
+  }
+
+  // Manual press-and-hold safety timeout.
+  if (
+    !autoMode &&
+    (leftMotorCommand != 0 || rightMotorCommand != 0) &&
+    now - lastManualCommandMs > MANUAL_LEASE_MS
+  ) {
+    stopAndDisarm("MANUAL_COMMAND_TIMEOUT");
+    setLEDs(255, 60, 0);
+  }
+
+  if (now - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
+    lastTelemetryMs = now;
+    sendTelemetry();
+  }
+
+  delay(2);
+}
