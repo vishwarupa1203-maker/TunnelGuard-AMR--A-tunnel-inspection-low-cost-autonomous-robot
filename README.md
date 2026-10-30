@@ -1,105 +1,417 @@
-# TunnelGuard AMR dashboard
+# TunnelGuard AMR
+### Autonomous Mobile Robot for Tunnel and Confined-Space Inspection
 
-A Vite dashboard for the TunnelGuard autonomous tunnel inspection rover. The UI is plain JavaScript, HTML, and CSS; Three.js is loaded locally when Demo Mode is opened.
+TunnelGuard AMR is a low-cost autonomous inspection rover designed to assist in monitoring tunnels and confined industrial spaces. It uses an ESP32-based embedded control system, ultrasonic sensors, wheel encoders and an MPU6050 IMU to detect nearby obstacles, estimate movement and navigate through an environment.
 
-## Requirements
+The robot communicates wirelessly with a browser-based dashboard, allowing users to monitor its status, view sensor readings, control movement and visualize its estimated path.
+
+---
+
+## 1. Problem Statement
+
+Inspecting tunnels and confined industrial environments can be challenging because of:
+
+- Safety risks associated with sending personnel into restricted or hazardous areas.
+- Difficulty accessing narrow or confined spaces.
+- Time-consuming manual inspection procedures.
+- Limited real-time visibility of obstacles and environmental conditions.
+- Difficulty monitoring the robot's movement and operating status remotely.
+
+### Our Proposed Solution
+
+TunnelGuard AMR aims to provide an affordable robotic platform for remote inspection and basic autonomous navigation in confined spaces.
+
+The rover can:
+- Navigate using an ESP32-based control system.
+- Detect nearby obstacles using multiple ultrasonic sensors.
+- Estimate its movement and heading using wheel encoders and an IMU.
+- Avoid obstacles using an onboard automatic movement algorithm.
+- Transmit live telemetry to a laptop dashboard over Wi-Fi.
+- Support manual remote operation and automatic navigation modes.
+
+The current prototype focuses on obstacle detection, basic navigation, telemetry and remote monitoring. Advanced tunnel mapping and surface-defect detection are potential future extensions.
+
+---
+
+## 2. System Architecture
+
+The system consists of three main layers:
+
+1. **Hardware Layer:** Sensors, motors, motor driver, battery and ESP32.
+2. **Embedded Control Layer:** Sensor acquisition, motor control, obstacle avoidance and telemetry generation.
+3. **Dashboard Layer:** Wireless communication, robot monitoring, manual controls and visualization.
+
+### Overall Architecture
+
+```text
+             TUNNELGUARD AMR
+                    |
+          +---------+---------+
+          |                   |
+      HARDWARE             SOFTWARE
+          |                   |
+     +----+----+        +-----+------+
+     |         |        |            |
+  Sensors   Motors   ESP32 Firmware  Dashboard
+     |         |        |            |
+     |         |   Sensor Processing |
+     |         |   Motor Control    |
+     |         |   Obstacle Avoid.  |
+     |         |   Telemetry        |
+     |         |        |            |
+     +----+----+        |            |
+          |             |            |
+        ESP32 <---- Wi-Fi / WebSocket ----> Laptop
+                                         |
+                                   Browser Dashboard
+                                         |
+                               Status / Map / Controls
+```
+
+### Hardware Architecture
+
+The ESP32 acts as the main controller of the rover.
+
+**Input and sensing subsystem**
+- Three HC-SR04 ultrasonic sensors mounted at the front, left and right to measure obstacle distances.
+- Two wheel encoders to estimate wheel rotation and travelled distance.
+- MPU6050 accelerometer and gyroscope to estimate orientation and heading.
+
+**Motor and output subsystem**
+- L298N dual H-bridge motor driver.
+- Four BO geared DC motors arranged as a four-wheel drive rover.
+- WS2812B RGB LED strip for visual status indication.
+- Buzzer for audible alerts.
+
+**Power subsystem**
+- 7.4 V, 2,200 mAh rechargeable 2S Li-ion battery pack.
+- Battery protection circuitry, if fitted in the pack.
+- Regulated supply for the ESP32 and low-voltage electronics.
+
+The battery provides power to the motor and electronics power paths. Appropriate voltage regulation and common grounding are required for reliable operation.
+
+---
+
+## 3. Hardware Components
+
+| Component | Function |
+|---|---|
+| ESP32 | Main controller, Wi-Fi communication and embedded processing |
+| 4 BO geared motors | Rover movement |
+| L298N motor driver | Controls motor direction and speed |
+| 3 HC-SR04 ultrasonic sensors | Front, left and right obstacle detection |
+| 2 wheel encoders | Wheel rotation and distance estimation |
+| MPU6050 IMU | Acceleration and angular velocity measurement |
+| WS2812B RGB LEDs | Visual status indication |
+| Buzzer | Audible alerts |
+| 7.4 V, 2,200 mAh Li-ion battery | Main power source |
+
+---
+
+## 4. Software Architecture
+
+The software is divided into two major components.
+
+### A. ESP32 Firmware
+
+The ESP32 firmware is responsible for real-time hardware interaction and robot control.
+
+Main functions:
+- Reading distance measurements from the three ultrasonic sensors.
+- Reading wheel encoder pulses.
+- Communicating with the MPU6050 over I2C.
+- Controlling four DC motors through the L298N driver.
+- Implementing manual movement and automatic obstacle avoidance.
+- Estimating robot position and heading using encoder/IMU data.
+- Sending periodic telemetry to the dashboard.
+- Receiving movement and operating-mode commands over Wi-Fi.
+
+Automatic obstacle avoidance runs on the ESP32. It does not depend on the laptop dashboard to make movement decisions.
+
+### B. Web-Based Dashboard
+
+The dashboard is developed using:
+
+- HTML
+- CSS
+- JavaScript
+- Vite development and build tooling
+- Three.js for the local 3D simulation
+
+The dashboard runs in a modern web browser and communicates with the ESP32 through WebSocket connections.
+
+It provides a graphical interface for monitoring the robot, controlling movement and visualizing its estimated trajectory.
+
+---
+
+## 5. Communication Architecture
+
+TunnelGuard AMR uses Wi-Fi and WebSocket communication between the ESP32 and the laptop dashboard.
+
+### Communication Workflow
+
+1. The ESP32 connects to an available 2.4 GHz Wi-Fi router or hotspot using Wi-Fi station mode.
+2. The laptop running the dashboard connects to the same reachable network.
+3. The ESP32 starts a WebSocket server on port `81`.
+4. The dashboard connects to the ESP32 using its current IP address and port.
+5. The ESP32 continuously sends telemetry data to the dashboard.
+6. The dashboard sends control commands back to the ESP32 when the user interacts with the interface.
+
+**Connection format:**
+
+```text
+ws://ESP32_IP_ADDRESS:81
+```
+
+For example:
+
+```text
+ws://192.168.0.105:81
+```
+
+The actual IP address is assigned by the network and must be checked in the ESP32 Serial Monitor.
+
+### Data Communication
+
+**ESP32 → Dashboard**
+
+The ESP32 transmits JSON telemetry containing information such as:
+
+- Operating mode and robot state.
+- Selected speed level and measured speed.
+- Front, left and right ultrasonic distances.
+- Estimated heading.
+- Estimated X and Y position.
+- Obstacle detection status and direction.
+- MPU6050 availability.
+- Wi-Fi connection status, IP address and signal strength.
+- Telemetry timestamp and sequence number.
+
+Example telemetry structure:
+
+```json
+{
+  "mode": "AUTO",
+  "state": "AUTO_CRUISE",
+  "speedLevel": 2,
+  "speedCmS": 12.5,
+  "distanceCm": {
+    "front": 45,
+    "left": 80,
+    "right": 65
+  },
+  "headingDeg": 90,
+  "position": {
+    "x": 120,
+    "y": 25
+  },
+  "obstacle": false,
+  "obstacleDirection": "NONE",
+  "mpuPresent": true,
+  "wifiConnected": true
+}
+```
+
+The values above are illustrative and not a recorded robot measurement.
+
+**Dashboard → ESP32**
+
+The dashboard sends JSON commands for manual movement, speed selection and operating modes.
+
+Supported command types include:
+
+| Command | Function |
+|---|---|
+| `MANUAL` | Manual movement control |
+| `SET_SPEED` | Select speed level |
+| `START_AUTO` | Start automatic navigation |
+| `STOP` | Stop normal movement |
+| `EMERGENCY_STOP` | Trigger latched emergency stop |
+| `RESET_STOP` | Reset the emergency-stop state |
+| `RESET_POSITION` | Reset estimated position and heading |
+
+Three speed levels are available:
+
+| Speed level | PWM value | Setting |
+|---|---:|---|
+| 1 | 110 | Slow |
+| 2 | 150 | Medium |
+| 3 | 190 | Fast |
+
+PWM values are requested motor-control values, not calibrated physical speed measurements.
+
+---
+
+## 6. Dashboard Features
+
+The browser-based dashboard provides three main visualization tabs.
+
+### Dashboard Overview
+
+- Robot connection status.
+- Operating mode and current movement state.
+- Selected speed level.
+- Front, left and right obstacle distances.
+- Heading and estimated position.
+- Wi-Fi connection and signal information.
+- Telemetry freshness and connection errors.
+
+### 2D Map
+
+- Top-down visualization of the robot's estimated movement.
+- Approximate trajectory based on encoder and IMU odometry.
+- Estimated obstacle markers using available sensor measurements.
+- Reset map and reset position controls.
+
+The live map is based on firmware telemetry. It is not a SLAM-generated map or a complete reconstruction of the tunnel.
+
+### 3D Tunnel View — Demo Mode
+
+The dashboard also provides a simulated 3D tunnel environment.
+
+Features include:
+- Synthetic tunnel geometry.
+- Simulated multi-layer LiDAR scanning.
+- 3D point-cloud visualization.
+- Simulated rocks, rubble and box-like obstacles.
+- Illustrative damp, crack and corrosion patches.
+- Camera-like visualization.
+- Adjustable scan resolution and scan rate.
+- Play, pause, speed and camera controls.
+
+**Important:** The 3D tunnel, LiDAR scans and camera-like inspection are software simulations. They do not represent readings from a physical LiDAR sensor, camera or actual tunnel inspection.
+
+---
+
+## 7. Operating Modes
+
+### Manual Mode
+The user controls the rover through dashboard movement buttons:
+- Forward
+- Reverse
+- Left
+- Right
+- Stop
+
+Movement commands are sent to the ESP32 through WebSocket communication.
+
+### Automatic Mode
+The ESP32 executes its onboard obstacle-avoidance state machine.
+
+The current firmware includes states such as:
+- `AUTO_CRUISE`
+- `AUTO_TURN_AWAY`
+- `AUTO_BYPASS`
+- `AUTO_TURN_BACK`
+
+The robot uses front and side ultrasonic measurements to make basic movement and obstacle-avoidance decisions.
+
+### Demo Mode
+A local browser simulation that demonstrates the dashboard's tunnel visualization, synthetic scanner, point cloud and classification features.
+
+Demo Mode does not communicate with physical motors or sensors.
+
+---
+
+## 8. Installation and Setup
+
+### Requirements
 
 - Node.js 20.19+ or 22.12+
 - npm
-- A modern browser with Canvas and WebGL support for the 3D demo
+- Modern web browser with Canvas and WebGL support for 3D Demo Mode
+- ESP32 firmware and hardware for live robot operation
 
-## Install and run
+### Run the Dashboard
 
-From the project directory:
+Clone the repository:
 
-```powershell
+```bash
+git clone <YOUR_REPOSITORY_URL>
+```
+
+Navigate to the dashboard project directory:
+
+```bash
+cd <DASHBOARD_DIRECTORY>
+```
+
+Install dependencies:
+
+```bash
 npm install
+```
+
+Start the development server:
+
+```bash
 npm run dev
 ```
 
-Open the local URL printed by Vite (normally `http://localhost:5173`). Dependency files are local after installation; the dashboard does not load fonts, scripts, or stylesheets from a CDN. Internet is not needed to use Demo Mode after installation.
+Open the local URL displayed by Vite, normally:
 
-To create and preview a production build:
+```text
+http://localhost:5173
+```
 
-```powershell
+### Build for Production
+
+```bash
 npm run build
 npm run preview
 ```
 
-## Dashboard pages
+Dashboard dependencies are installed locally. The application does not require external CDN resources to run after installation.
 
-Use the **Dashboard**, **Map**, and **3D view** tabs below the header to move between the compact rover status overview, a full-width 2D map, and the tunnel visualization. The dashboard overview is arranged to fit common laptop screens; smaller windows can scroll as needed. The map and 3D view have dedicated space so their visualizations are easier to inspect.
+### Connect the Physical Robot
 
-## Demo Mode
+1. Power on the TunnelGuard rover.
+2. Connect the ESP32 and laptop to the same reachable 2.4 GHz Wi-Fi network.
+3. Open the ESP32 Serial Monitor.
+4. Copy the WebSocket URL printed by the firmware.
+5. Enter the URL in the dashboard's ESP32 Connection field.
+6. Press Connect.
+7. Verify that valid telemetry is being received before operating the motors.
 
-Choose **Demo Mode** in the top bar. The browser builds a seeded, 58 m synthetic tunnel and advances a simulated rover at 0.42 m/s. The environment has a curved centerline, changing width and height, an uneven wall, floor and ceiling, ellipsoid rocks, a wall-attached rock, rubble, boxes, and synthetic damp, crack, and corrosion patches. Resetting Demo Mode returns to the same generated environment and scanner noise sequence.
+---
 
-### Shared map and simulated sensors
+## 9. Safety and Limitations
 
-The simulation uses metres in one right-handed world frame: **X** runs along the tunnel, **Y** runs across it, and **Z** is height. Robot position and heading, tunnel surfaces, obstacles, camera rays, and LiDAR returns share this frame. The Map page accumulates classified scan returns and trajectory; the 3D view renders the same environment and robot pose with the accumulated point cloud. Its walls and obstacles are the simulation's ground-truth geometry, while the point cloud shows what the simulated scanner has observed.
+- Ultrasonic sensors provide basic distance measurements and may be affected by surface angle, material and environmental conditions.
+- Encoder and IMU-based odometry provides approximate position and heading estimates. Errors can accumulate due to wheel slip and gyroscope drift.
+- The current live map is not a SLAM-based navigation map.
+- The simulated LiDAR and camera features are available only in Demo Mode.
+- Real-time corrosion, crack or dampness detection using a physical camera has not been implemented in the current prototype.
+- Battery runtime depends on motor load, speed, surface conditions and battery health.
+- The dashboard's emergency-stop command is a software control and does not replace a dedicated hardware emergency-stop circuit.
+- Physical movement, sensor calibration, electrical protection and network reliability must be verified on the actual rover.
 
-The simulated multi-layer LiDAR defaults to a 270° horizontal field of view, 2.5° angular step, five vertical layers (-18°, -9°, 0°, 9°, 18°), 14 m maximum range, 8 mm measurement noise, a 1.2% invalid-return probability, and 4 scans per second. Rays intersect the generated tunnel surfaces and ellipsoid/box obstacle geometry. Each raw return records angle, range, sensor- and world-frame coordinates, timestamp, intensity, and internal ground truth. The user-facing classified points do not include those ground-truth labels.
+Always test the rover in a controlled environment and at low speed before attempting autonomous operation.
 
-Adjust **LiDAR step** and **scan rate** in the 3D view. Other scanner settings can be configured through `LidarScanner` in `src/lidar.js` (`fieldOfViewDeg`, `verticalLayersDeg`, `maxRangeM`, `measurementNoiseM`, and `invalidRate`); invalid values raise a `RangeError`.
+---
 
-### Classification and camera-like inspection
+## 10. Future Scope
 
-The classifier first compares each return with the generated nominal floor, ceiling, and continuous wall surfaces. Returns outside the surface tolerance are grouped by 3D proximity and assigned a tentative geometric class: rock, low rubble, box-like artificial obstacle, or unknown. Confidence is shown with detections. A protrusion close to a wall is deliberately marked **unknown** with a warning that LiDAR alone may not separate it from wall roughness. The 2D and 3D legends use the same wall, floor, ceiling, rock, rubble, box, and unknown colors. Regions without returned points remain unobserved; the map's dashed tunnel outline is a profile reference, not a sensor observation.
+Potential future improvements include:
 
-The forward camera-like panel is rendered by casting a low-resolution image grid into that same environment. It shows synthetic surface materials and reports visible damp, corrosion, and crack patches with range and confidence. This is a deterministic simulation/illustration, not a real camera, trained vision model, or hardware scan. The displayed ground-truth agreement is an internal simulation validation metric only; it is not real-world detection accuracy.
+- Integration of a physical 2D LiDAR sensor for tunnel scanning.
+- SLAM-based mapping and improved autonomous navigation.
+- Camera integration for tunnel surface inspection.
+- Computer vision for identifying cracks, corrosion and surface deterioration.
+- Improved localization using sensor fusion.
+- Battery voltage, current and state-of-charge monitoring.
+- Inspection data logging and report generation.
+- Longer-range wireless communication for industrial environments.
 
-The simulation provides play/pause, 0.5×/1×/2× speed, LiDAR resolution/rate controls, orbit, pan, zoom, and reset-camera controls. **No physical motor, sensor, or ESP32 commands are used by Demo Mode.**
+---
 
-The 3D view page is available only in Demo Mode. Automatic Mode continues to use the existing ESP32 WebSocket telemetry and control path; it does not use or display the simulated LiDAR/camera as live sensor data.
+## Project Summary
 
-## Connect to the ESP32
+TunnelGuard AMR demonstrates the integration of embedded systems, robotics, wireless communication, sensor-based obstacle avoidance and web-based monitoring in an affordable mobile inspection platform.
 
-The supplied firmware uses Wi-Fi station mode and connects to the configured hotspot/router; it does not create an ESP32 access point. Connect the laptop and ESP32 to the same reachable 2.4 GHz network. In the Serial Monitor, copy the firmware's printed WebSocket URL (the current IP followed by `:81`) into the always-visible **ESP32 CONNECTION** field, then press **Connect**. There is no fixed IP default. The dashboard saves the entered URL in browser local storage. **Disconnect** disables reconnect attempts; **Connect** or **Reconnect** starts a fresh socket attempt.
+The project establishes a foundation for future development into a more capable autonomous tunnel inspection system.
 
-The header separately reports the browser-to-ESP32 WebSocket, the ESP32's reported Wi-Fi association, and telemetry freshness. **CONNECTED** means only that the WebSocket opened. **LIVE DATA** appears only after valid telemetry; data becomes **TELEMETRY STALE** after 1.5 seconds without a valid update. The WebSocket can remain connected while the ESP32 Wi-Fi status or telemetry is unavailable. The dashboard shows the firmware-reported IP and RSSI, last valid update/age, and the most recent connection error. It never substitutes Demo Mode data in live modes.
+**Technologies:** ESP32 · Embedded C/C++ · Ultrasonic Sensing · MPU6050 · Wheel Encoders · L298N · Wi-Fi · WebSockets · HTML · CSS · JavaScript · Vite · Three.js
 
-### Operating modes and map
-
-- **Automatic Mode** sends `START_AUTO` only after fresh telemetry and a valid front range. It offers normal **Stop**, **Emergency Stop**, and reset-after-emergency controls. Automatic movement/avoidance runs in the ESP32 firmware, not in the browser. The browser displays the firmware's reported state and warns if the front or side sensors are unavailable.
-- **Manual Mode** sends a direction immediately on press, refreshes the command approximately every 200 ms while held, and sends a stop on release or when telemetry becomes stale. Movement controls are disabled when telemetry is stale, the socket closes, Wi-Fi reports offline, or the firmware reports an emergency stop. The firmware's 700 ms manual command lease is a backup, not the dashboard's normal stop mechanism.
-- **Demo Mode** remains a local simulation; no ESP32 telemetry or movement commands are used. Its 2D and 3D tunnel visualizations are synthetic. The 3D page is Demo-only; live Automatic and Manual modes use the 2D top-down map only.
-
-The live map uses firmware telemetry only. Firmware `position.x` and `position.y` are in centimetres and are converted to metres for display; heading is in degrees. Its trajectory is approximate encoder/IMU odometry, not SLAM. A sensor-estimated obstacle marker is added only when firmware reports `obstacle: true` and a valid `obstacleDirection`/range. Its position uses the robot pose and sensor direction, without a measured sensor mounting offset. **Reset map** clears only the displayed history; **Reset position** sends `RESET_POSITION` to the firmware. This is not a safety-rated navigation system.
-
-### Telemetry schema emitted by the supplied firmware
-
-The dashboard validates the core `mode`, `state`, `speedLevel`, `speedCmS`, `distanceCm`, `headingDeg`, and `position.x/y` fields. It also reads `obstacle`, `obstacleDirection`, `mpuPresent`, `wifiConnected`, `ip`, `wifiRssi`, `telemetryMs`, and `seq`. Speed is reported in cm/s and can be negative while reversing. Position is reported in centimetres. Invalid or negative ultrasonic values (firmware uses `-1` for no return) are displayed as unavailable and are never treated as clear space. Missing/invalid optional values are shown as unknown/unavailable.
-
-### Exact firmware command protocol
-
-The dashboard sends these JSON text frames over WebSocket port 81, using the command strings handled by the supplied firmware:
-
-```json
-{"command":"MANUAL","action":"FORWARD","speed":110}
-{"command":"MANUAL","action":"REVERSE","speed":110}
-{"command":"MANUAL","action":"LEFT","speed":110}
-{"command":"MANUAL","action":"RIGHT","speed":110}
-{"command":"MANUAL","action":"STOP","speed":0}
-{"command":"SET_SPEED","level":1}
-{"command":"SET_SPEED","level":2}
-{"command":"SET_SPEED","level":3}
-{"command":"START_AUTO"}
-{"command":"STOP"}
-{"command":"EMERGENCY_STOP"}
-{"command":"RESET_STOP"}
-{"command":"RESET_POSITION"}
-```
-
-Speed levels map to requested PWM values 110 (Slow), 150 (Medium), and 190 (Fast). Manual movement includes the selected PWM in its `speed` field and is refreshed while held. `STOP` disarms/stops without latching; `EMERGENCY_STOP` latches until `RESET_STOP`. `START_AUTO` starts the firmware's timed obstacle-avoidance state machine if the front sensor is valid. `RESET_POSITION` zeros firmware position and heading. A successful WebSocket send confirms only that the browser handed a frame to the socket, not that motors physically responded. Neither dashboard stop control replaces a hardware emergency-stop circuit.
-
-The supplied firmware configures the front/left/right HC-SR04 sensors, MPU6050, wheel encoders, L298N driver and WS2812B strip from its source pin definitions. Hardware wiring, sensor-level shifting, calibration, safe motor behavior and actual network/control behavior still require on-robot verification.
-
-The WS2812B display on the dashboard is inferred from telemetry state, not measured LED feedback.
-
-## ESP32 code images
-
-Screenshots of the ESP32 firmware can be added to [`docs/esp32-code-images/`](docs/esp32-code-images/). See that folder's README for upload and privacy notes. These images document the firmware; they are not compiled or used by the dashboard.
-
-## Validation
-
-Run `npm run build` to validate the production bundle. Demo Mode can be used without hardware. A successful build or browser-side socket check does not verify physical Wi-Fi, telemetry, movement, sensor calibration, or the firmware's safety behavior; test with the rover secured and at low speed.
+**Project:** TunnelGuard AMR  
+**Category:** Robotics · Autonomous Systems · Industrial Inspection
