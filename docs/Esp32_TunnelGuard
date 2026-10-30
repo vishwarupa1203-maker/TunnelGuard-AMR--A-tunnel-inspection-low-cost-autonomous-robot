@@ -29,8 +29,8 @@
 #include <math.h>
 
 // ------------ Wi-Fi ------------
-const char* WIFI_SSID = "Galaxy M34 5G 0621";
-const char* WIFI_PASSWORD = "mansi123";
+const char* WIFI_SSID = "YOUR_COMMON_WIFI_NAME";
+const char* WIFI_PASSWORD = "WIFI_PASSWORD";
 
 
 WebSocketsServer webSocket(81);
