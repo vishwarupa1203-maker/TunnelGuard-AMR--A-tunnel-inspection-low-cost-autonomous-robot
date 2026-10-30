@@ -43,30 +43,8 @@ The system consists of three main layers:
 
 ### Overall Architecture
 
-```text
-             TUNNELGUARD AMR
-                    |
-          +---------+---------+
-          |                   |
-      HARDWARE             SOFTWARE
-          |                   |
-     +----+----+        +-----+------+
-     |         |        |            |
-  Sensors   Motors   ESP32 Firmware  Dashboard
-     |         |        |            |
-     |         |   Sensor Processing |
-     |         |   Motor Control    |
-     |         |   Obstacle Avoid.  |
-     |         |   Telemetry        |
-     |         |        |            |
-     +----+----+        |            |
-          |             |            |
-        ESP32 <---- Wi-Fi / WebSocket ----> Laptop
-                                         |
-                                   Browser Dashboard
-                                         |
-                               Status / Map / Controls
-```
+<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/706c91b9-f9c6-4419-8976-56c8e9ce44e7" 
+
 
 ### Hardware Architecture
 
