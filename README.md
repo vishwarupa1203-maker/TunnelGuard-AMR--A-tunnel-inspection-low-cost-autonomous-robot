@@ -96,6 +96,10 @@ The supplied firmware configures the front/left/right HC-SR04 sensors, MPU6050, 
 
 The WS2812B display on the dashboard is inferred from telemetry state, not measured LED feedback.
 
+## ESP32 code images
+
+Screenshots of the ESP32 firmware can be added to [`docs/esp32-code-images/`](docs/esp32-code-images/). See that folder's README for upload and privacy notes. These images document the firmware; they are not compiled or used by the dashboard.
+
 ## Validation
 
 Run `npm run build` to validate the production bundle. Demo Mode can be used without hardware. A successful build or browser-side socket check does not verify physical Wi-Fi, telemetry, movement, sensor calibration, or the firmware's safety behavior; test with the rover secured and at low speed.
